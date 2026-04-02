@@ -4,15 +4,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
                              QLabel, QVBoxLayout, QHBoxLayout, QGridLayout, QFileDialog, QMessageBox)
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
-import cv2
-
-import processor
 
 
-# from contour_finding import  similar_circular_contours     # сколько контуров разного размера
-# процент их насыщенности и еще радиус. будут выведены данные каждого кружочка, кружочки на фотках будут пронумированы на фотографии
-
-#  КЛАСС ДЛЯ ПЕРЕТАСКИВАНИЯ
+# --- КЛАСС ДЛЯ ПЕРЕТАСКИВАНИЯ (Drag & Drop) ---
 class DropZone(QLabel):
     def __init__(self, title, parent=None):
         super().__init__(title, parent)
@@ -46,26 +40,17 @@ class DropZone(QLabel):
         self.setStyleSheet("border: 1px solid #999; background: white;")
 
 
-#   ЛОГИКА ОБРАБОТКИ
+# --- ЛОГИКА ОБРАБОТКИ ---
 def process_image(file_path):
-    # созраненрие результатов в разные файлы
-    path1 = file_path  # Оригинал
-    path2 = "processed_sepia.jpg"  # Путь к фото с фильтром 1
-    path3 = "processed_bw.jpg"  # Путь к фото с фильтром 2
-    path4 = "final_result.png"  # Путь к итоговому фото
-
-    # Собираем их в список
-    processed_paths = [path1, path2, path3, path4]
-
-    stats = {"Яркость": "82%", "Контраст": "1.4", "Шум": "Низкий", "Экспозиция": "+0.5"}
+    stats = {"Количество контуров разного размера": "значение из файла", "Процент их насыщенности": "из другого файла",
+             "Радиус": "из другого файла", "че-то еще": "что-то"}
     info = {
         "значение": "пояснение"
     }
+    return [file_path] * 4, stats, info
 
-    return processed_paths, stats, info
 
-
-#  ГЛАВНОЕ ОКНО
+# --- ГЛАВНОЕ ОКНО ---
 class ImageProcessorApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -79,21 +64,11 @@ class ImageProcessorApp(QMainWindow):
 
         # 1. ЛЕВАЯ ПАНЕЛЬ
         self.stats_panel = QVBoxLayout()
-        self.stats_label = QLabel("Загрузите фото кнопкой снизу или перетащите фото в поле 'Слот 1'")
+        self.stats_label = QLabel("Загрузите фото кнопкой\nили перетащите в поле 'Слот 1'")
         self.stats_label.setFixedWidth(300)
         self.stats_label.setAlignment(Qt.AlignTop)
         self.stats_label.setWordWrap(True)
-
-        # Добавляем font-size (размер) и font-weight (жирность)
-        self.stats_label.setStyleSheet("""
-            padding: 15px; 
-            background: #fff; 
-            border: 1px solid #ccc; 
-            border-radius: 8px;
-            font-size: 18px;          /* Размер шрифта в пикселях */
-            font-weight: bold;        /* Жирный шрифт */
-            color: #333333;           /* Цвет текста для четкости */
-        """)
+        self.stats_label.setStyleSheet("padding: 15px; background: #fff; border: 1px solid #ccc; border-radius: 8px;")
 
         self.btn_info = QPushButton("❓ Подробная сводка")
         self.btn_info.setFixedWidth(300)
@@ -118,8 +93,9 @@ class ImageProcessorApp(QMainWindow):
         for i in range(4):
             v_box = QVBoxLayout()
 
+            # Первый слот делаем зоной для Drag & Drop
             if i == 0:
-                img_label = DropZone("Слот 1", self)
+                img_label = DropZone("Перетащите сюда оригинал", self)
             else:
                 img_label = QLabel(f"Слот {i + 1}")
                 img_label.setAlignment(Qt.AlignCenter)
@@ -151,54 +127,36 @@ class ImageProcessorApp(QMainWindow):
         if file_path:
             self.start_processing(file_path)
 
+    def start_processing(self, file_path):
+        # Общая функция для обоих способов загрузки
+        paths, stats, info = process_image(file_path)
 
-def start_processing(self, file_path):
-    # из второго файла изображения через return сделать
-    # Она должна возвращать: список из 4 путей, словарь stats и словарь info
-    try:
-        paths, stats, info = processor.run_filters(file_path)
+        titles = [
+            "ОРИГИНАЛ",
+            "ВСЕ КРУГЛЫЕ КОНТУРЫ",
+            "ПОХОЖИЕ КРУГЛЫЕ КОНТУРЫ",
+            "ПРОНУМИРОВАННЫЕ СФЕРОИДЫ"
+        ]
+
         self.current_info = info
-    except Exception as e:
-        QMessageBox.critical(self, "Ошибка обработки", f"Не удалось обработать файл:\n{e}")
-        return
 
-    # 2. Подписи для ваших 4-х слотов
-    titles = [
-        "ОРИГИНАЛ",
-        "ВСЕ КРУГЛЫЕ КОНТУРЫ",
-        "ПОХОЖИЕ КРУГЛЫЕ КОНТУРЫ",
-        "ПРОНУМИРОВАННЫЕ СФЕРОИДЫ"
-    ]
-
-    # 3. Цикл обновления изображений и подписей
-    for i in range(4):
-        if i < len(paths) and os.path.exists(paths[i]):
-            # Загружаем фото, если файл существует
+        for i in range(4):
             pix = QPixmap(paths[i]).scaled(450, 450, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.image_widgets[i].setPixmap(pix)
             self.image_widgets[i].setStyleSheet("border: 1px solid #999; background: white;")
-        else:
-            # Если файла нет или путей меньше 4-х
-            self.image_widgets[i].setText(f"Файл {i + 1} не найден")
-            self.image_widgets[i].setStyleSheet("border: 1px dashed red; background: #fff0f0;")
+            self.caption_widgets[i].setText(titles[i])
 
-        # В любом случае обновляем подпись под картинкой
-        self.caption_widgets[i].setText(titles[i])
+        res_html = "<h3>📊 Показатели:</h3><hr>"
+        for k, v in stats.items():
+            res_html += f"<p><b>{k}:</b> <span style='color: #0277bd;'>{v}</span></p>"
+        self.stats_label.setText(res_html)
+        self.btn_info.setEnabled(True)
 
-    # 4. Обновление жирного текста в широкой панели слева
-    res_html = "<h3>📊 Показатели:</h3><hr>"
-    for k, v in stats.items():
-        res_html += f"<p style='margin-bottom: 10px;'><b>{k}:</b> <span style='color: #0277bd;'>{v}</span></p>"
-
-    self.stats_label.setText(res_html)
-    self.btn_info.setEnabled(True)
-
-
-def show_summary(self):
-    summary = "<h3>Справочная информация</h3><br>"
-    for k, v in self.current_info.items():
-        summary += f"<b>{k}</b>:<br>{v}<br><br>"
-    QMessageBox.information(self, "Инфо", summary)
+    def show_summary(self):
+        summary = "<h3>Справочная информация</h3><br>"
+        for k, v in self.current_info.items():
+            summary += f"<b>{k}</b>:<br>{v}<br><br>"
+        QMessageBox.information(self, "Инфо", summary)
 
 
 if __name__ == "__main__":
