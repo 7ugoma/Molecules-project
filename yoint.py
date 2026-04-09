@@ -7,11 +7,11 @@ import gc
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QPushButton,
                              QLabel, QVBoxLayout, QHBoxLayout, QGridLayout,
                              QFileDialog, QMessageBox, QSlider, QSplitter,
-                             QTreeWidget, QTreeWidgetItem, QFrame, QProgressBar,
-                             QStatusBar, QToolBar, QAction, QGroupBox, QHeaderView,
-                             QTableWidget, QTableWidgetItem, QTabWidget, QScrollArea)
-from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QColor, QBrush
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+                             QFrame, QProgressBar, QStatusBar, QToolBar,
+                             QAction, QGroupBox, QTableWidget, QTableWidgetItem,
+                             QScrollArea, QHeaderView)
+from PyQt5.QtGui import QPixmap, QImage, QFont, QColor, QBrush, QWheelEvent
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QPoint, QEvent
 from ultralytics import YOLO
 
 # Загрузка модели YOLO
@@ -19,7 +19,7 @@ model = YOLO("best.pt")
 
 
 class ProcessingThread(QThread):
-    """Поток для обработки изображения, чтобы не блокировать интерфейс"""
+    """Поток для обработки изображения"""
     finished = pyqtSignal(object)
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
@@ -39,7 +39,6 @@ class ProcessingThread(QThread):
         self.progress.emit(50)
         self.status.emit("Обработка результатов...")
 
-        # Извлечение масок и боксов
         masks_data = []
 
         if result.masks is not None:
@@ -53,7 +52,6 @@ class ProcessingThread(QThread):
                     class_idx = int(classes[i])
                     class_name = result.names[class_idx] if hasattr(result, 'names') else f"Class {class_idx}"
 
-                    # Получение координат bounding box
                     if hasattr(result.boxes, 'xyxy'):
                         bbox = result.boxes.xyxy[i].cpu().numpy()
                     else:
@@ -71,7 +69,6 @@ class ProcessingThread(QThread):
         self.progress.emit(80)
         self.status.emit("Визуализация...")
 
-        # Создание визуализации
         plotted = result.plot()
 
         self.progress.emit(100)
@@ -85,87 +82,229 @@ class ProcessingThread(QThread):
         })
 
 
-class ScrollableImageLabel(QWidget):
-    """Виджет с прокруткой для просмотра изображения"""
+class ZoomableImageLabel(QLabel):
+    """Виджет для отображения изображения с возможностью зума и панорамирования"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("border: none; background: #2b2b2b;")
+        self.setMinimumSize(400, 400)
+        self.setScaledContents(False)
+
+        self.original_pixmap = None
+        self.current_pixmap = None
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.drag_start = None
+        self.is_dragging = False
+        self.last_mouse_pos = None
+
+        self.setMouseTracking(True)
+
+    def set_image(self, pixmap):
+        """Установка изображения"""
+        self.original_pixmap = pixmap
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.update_display()
+
+    def update_display(self):
+        """Обновление отображения с учетом зума и панорамирования"""
+        if self.original_pixmap is None or self.original_pixmap.isNull():
+            self.clear()
+            self.setText("Нет изображения")
+            return
+
+        try:
+            if self.zoom <= 1.0:
+                # При зуме <= 1 просто масштабируем под размер
+                scaled = self.original_pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.setPixmap(scaled)
+                self.current_pixmap = scaled
+            else:
+                # При зуме > 1 создаем увеличенную версию
+                orig_w = self.original_pixmap.width()
+                orig_h = self.original_pixmap.height()
+
+                new_w = int(orig_w * self.zoom)
+                new_h = int(orig_h * self.zoom)
+
+                # Ограничиваем максимальный размер
+                max_size = 3000
+                if new_w > max_size or new_h > max_size:
+                    scale = min(max_size / new_w, max_size / new_h)
+                    new_w = int(new_w * scale)
+                    new_h = int(new_h * scale)
+                    self.zoom = new_w / orig_w
+
+                scaled = self.original_pixmap.scaled(new_w, new_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+                # Получаем размеры виджета
+                widget_w = self.width()
+                widget_h = self.height()
+
+                # Вычисляем видимую область
+                x = self.pan_x
+                y = self.pan_y
+
+                # Ограничиваем панорамирование
+                max_pan_x = max(0, scaled.width() - widget_w)
+                max_pan_y = max(0, scaled.height() - widget_h)
+                x = max(0, min(x, max_pan_x))
+                y = max(0, min(y, max_pan_y))
+
+                # Обновляем pan_x, pan_y
+                self.pan_x = x
+                self.pan_y = y
+
+                # Вырезаем область
+                if scaled.width() > widget_w or scaled.height() > widget_h:
+                    cropped = scaled.copy(x, y, min(widget_w, scaled.width() - x), min(widget_h, scaled.height() - y))
+                    self.setPixmap(cropped)
+                    self.current_pixmap = cropped
+                else:
+                    self.setPixmap(scaled)
+                    self.current_pixmap = scaled
+        except Exception as e:
+            print(f"Error in display update: {e}")
+            self.setPixmap(self.original_pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        """При изменении размера виджета обновляем отображение"""
+        self.update_display()
+        super().resizeEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Обработка колесика мыши для зума"""
+        if self.original_pixmap is None:
+            return
+
+        # Сохраняем текущий зум
+        old_zoom = self.zoom
+
+        # Изменяем зум
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom *= 1.1
+        else:
+            self.zoom *= 0.9
+
+        # Ограничиваем зум
+        self.zoom = max(0.5, min(self.zoom, 3.0))
+
+        # Если зум изменился, корректируем панорамирование
+        if self.zoom != old_zoom and self.zoom > 1.0:
+            zoom_ratio = self.zoom / old_zoom
+            self.pan_x = int(self.pan_x * zoom_ratio)
+            self.pan_y = int(self.pan_y * zoom_ratio)
+
+        self.update_display()
+
+    def mousePressEvent(self, event):
+        """Начало панорамирования"""
+        if event.button() == Qt.LeftButton and self.zoom > 1.0:
+            self.drag_start = event.pos()
+            self.last_mouse_pos = event.pos()
+            self.is_dragging = True
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Панорамирование при зажатой левой кнопке"""
+        if self.is_dragging and self.drag_start and self.zoom > 1.0:
+            if self.last_mouse_pos:
+                delta = event.pos() - self.last_mouse_pos
+                self.pan_x -= delta.x()
+                self.pan_y -= delta.y()
+
+                # Ограничиваем панорамирование
+                if self.original_pixmap:
+                    new_w = int(self.original_pixmap.width() * self.zoom)
+                    new_h = int(self.original_pixmap.height() * self.zoom)
+                    widget_w = self.width()
+                    widget_h = self.height()
+
+                    max_pan_x = max(0, new_w - widget_w)
+                    max_pan_y = max(0, new_h - widget_h)
+
+                    self.pan_x = max(0, min(self.pan_x, max_pan_x))
+                    self.pan_y = max(0, min(self.pan_y, max_pan_y))
+
+                self.last_mouse_pos = event.pos()
+                self.update_display()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Завершение панорамирования"""
+        if event.button() == Qt.LeftButton:
+            self.is_dragging = False
+            self.drag_start = None
+            self.last_mouse_pos = None
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def clear(self):
+        """Очистка изображения"""
+        self.original_pixmap = None
+        self.current_pixmap = None
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        super().clear()
+        self.setText("Нет изображения")
+
+    def reset_view(self):
+        """Сброс зума и панорамирования"""
+        self.zoom = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.update_display()
+
+
+class ImageContainer(QWidget):
+    """Контейнер для изображения с прокруткой и поддержкой зума"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setup_ui()
-        self.current_pixmap = None
-        self.zoom = 1.0
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Создание области прокрутки
+        # Создаем область прокрутки
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: 2px solid #ccc;
-                border-radius: 5px;
-                background: #2b2b2b;
-            }
-        """)
+        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: #2b2b2b; }")
 
-        # Виджет для отображения изображения
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setStyleSheet("background: #2b2b2b;")
-
+        # Виджет с изображением
+        self.image_label = ZoomableImageLabel()
         self.scroll_area.setWidget(self.image_label)
+
         layout.addWidget(self.scroll_area)
 
     def set_image(self, pixmap):
-        """Установка изображения с сохранением пропорций"""
-        self.current_pixmap = pixmap
-        self.update_display()
-
-    def update_display(self):
-        """Обновление отображения с учетом зума"""
-        if self.current_pixmap is None:
-            return
-
-        # Масштабирование с учетом зума
-        w = int(self.current_pixmap.width() * self.zoom)
-        h = int(self.current_pixmap.height() * self.zoom)
-        scaled_pixmap = self.current_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.image_label.setPixmap(scaled_pixmap)
-
-    def wheelEvent(self, event):
-        """Обработка колесика мыши для зума"""
-        if self.current_pixmap is None:
-            return
-
-        # Сохраняем позицию до зума
-        old_pos = self.scroll_area.mapFromGlobal(event.globalPos())
-
-        # Изменяем зум
-        zoom_factor = 1.1 if event.angleDelta().y() > 0 else 0.9
-        self.zoom *= zoom_factor
-        self.zoom = max(0.2, min(self.zoom, 10))
-
-        # Обновляем изображение
-        self.update_display()
-
-        # Корректируем позицию прокрутки чтобы центр оставался на месте
-        new_pos = self.scroll_area.mapFromGlobal(event.globalPos())
-        delta = new_pos - old_pos
-        self.scroll_area.horizontalScrollBar().setValue(
-            self.scroll_area.horizontalScrollBar().value() + delta.x()
-        )
-        self.scroll_area.verticalScrollBar().setValue(
-            self.scroll_area.verticalScrollBar().value() + delta.y()
-        )
+        self.image_label.set_image(pixmap)
 
     def clear(self):
-        """Очистка изображения"""
-        self.current_pixmap = None
         self.image_label.clear()
-        self.zoom = 1.0
+
+    def reset_view(self):
+        self.image_label.reset_view()
+
+    def get_image_label(self):
+        return self.image_label
 
 
 class DropZone(QLabel):
@@ -177,7 +316,7 @@ class DropZone(QLabel):
         super().__init__(title, parent)
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(120)
         self.setStyleSheet("""
             QLabel {
                 border: 2px dashed #bbb;
@@ -238,7 +377,7 @@ class DropZone(QLabel):
 
 
 class ResultsTableWidget(QWidget):
-    """Виджет с увеличенной таблицей результатов"""
+    """Виджет с фиксированной таблицей результатов"""
 
     item_selected = pyqtSignal(int)
 
@@ -250,7 +389,7 @@ class ResultsTableWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Заголовок с подсчетом
+        # Заголовок
         self.header_label = QLabel("📊 Результаты сегментации")
         self.header_label.setStyleSheet("""
             QLabel {
@@ -268,15 +407,8 @@ class ResultsTableWidget(QWidget):
         self.table = QTableWidget()
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
-            "№",
-            "Класс",
-            "Уверенность",
-            "Площадь (px²)",
-            "Радиус (px)",
-            "Периметр (px)",
-            "Компактность",
-            "Центр X",
-            "Центр Y"
+            "№", "Класс", "Уверенность", "Площадь", "Радиус",
+            "Периметр", "Компактность", "Центр X", "Центр Y"
         ])
 
         # Настройка внешнего вида таблицы
@@ -285,36 +417,27 @@ class ResultsTableWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setSortingEnabled(True)
 
-        # Настройка шрифтов и размеров
+        # Запрещаем изменение размеров столбцов
+        header = self.table.horizontalHeader()
+        header.setSectionsMovable(False)
+        header.setSectionResizeMode(QHeaderView.Fixed)
+
+        # Фиксированная ширина столбцов
+        column_widths = [40, 100, 90, 80, 70, 80, 100, 80, 80]
+        for i, width in enumerate(column_widths):
+            self.table.setColumnWidth(i, width)
+
+        # Шрифт
         font = QFont()
-        font.setPointSize(11)
+        font.setPointSize(10)
         self.table.setFont(font)
 
-        # Растягивание колонок
-        header = self.table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(QHeaderView.Interactive)
-
-        # Установка минимальных ширин колонок
-        self.table.setColumnWidth(0, 50)  # №
-        self.table.setColumnWidth(1, 120)  # Класс
-        self.table.setColumnWidth(2, 100)  # Уверенность
-        self.table.setColumnWidth(3, 120)  # Площадь
-        self.table.setColumnWidth(4, 100)  # Радиус
-        self.table.setColumnWidth(5, 100)  # Периметр
-        self.table.setColumnWidth(6, 120)  # Компактность
-        self.table.setColumnWidth(7, 100)  # Центр X
-        self.table.setColumnWidth(8, 100)  # Центр Y
-
-        # Включение сортировки
-        self.table.setSortingEnabled(True)
-
-        # Подключение сигнала выбора
+        # Подключение сигнала
         self.table.itemSelectionChanged.connect(self.on_selection_changed)
 
         layout.addWidget(self.table)
 
-        # Панель статистики внизу таблицы
+        # Панель статистики
         self.stats_frame = QFrame()
         self.stats_frame.setStyleSheet("""
             QFrame {
@@ -342,6 +465,17 @@ class ResultsTableWidget(QWidget):
 
         layout.addWidget(self.stats_frame)
 
+        # Кнопка сброса зума
+        reset_zoom_btn = QPushButton("🔄 Сбросить зум во всех окнах")
+        reset_zoom_btn.clicked.connect(self.reset_all_zooms)
+        layout.addWidget(reset_zoom_btn)
+
+    def reset_all_zooms(self):
+        """Сброс зума во всех окнах"""
+        main_window = self.window()
+        if hasattr(main_window, 'reset_all_zooms'):
+            main_window.reset_all_zooms()
+
     def update_data(self, masks_data, original_image=None):
         """Обновление данных в таблице"""
         self.table.setRowCount(0)
@@ -359,29 +493,25 @@ class ResultsTableWidget(QWidget):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            # Расчет параметров
             area = self.calculate_mask_area(mask_data['mask'], w, h)
             radius = np.sqrt(area / np.pi)
             perimeter = self.calculate_mask_perimeter(mask_data['mask'], w, h)
             compactness = (4 * np.pi * area) / (perimeter * perimeter) if perimeter > 0 else 0
-
-            # Центр масс
             center_x, center_y = self.calculate_center(mask_data['mask'], w, h)
 
             areas.append(area)
             confidences.append(mask_data['conf'])
 
-            # Заполнение ячеек
             self.table.setItem(row, 0, QTableWidgetItem(str(i + 1)))
             self.table.setItem(row, 1, QTableWidgetItem(mask_data['class_name']))
 
             conf_item = QTableWidgetItem(f"{mask_data['conf']:.3f}")
             if mask_data['conf'] > 0.7:
-                conf_item.setForeground(QBrush(QColor(76, 175, 80)))  # Зеленый для высокой уверенности
+                conf_item.setForeground(QBrush(QColor(76, 175, 80)))
             elif mask_data['conf'] > 0.4:
-                conf_item.setForeground(QBrush(QColor(255, 152, 0)))  # Оранжевый для средней
+                conf_item.setForeground(QBrush(QColor(255, 152, 0)))
             else:
-                conf_item.setForeground(QBrush(QColor(244, 67, 54)))  # Красный для низкой
+                conf_item.setForeground(QBrush(QColor(244, 67, 54)))
             self.table.setItem(row, 2, conf_item)
 
             self.table.setItem(row, 3, QTableWidgetItem(f"{area:.0f}"))
@@ -400,70 +530,51 @@ class ResultsTableWidget(QWidget):
             self.table.setItem(row, 7, QTableWidgetItem(f"{center_x:.1f}"))
             self.table.setItem(row, 8, QTableWidgetItem(f"{center_y:.1f}"))
 
-            # Сохраняем индекс в данных строки
             self.table.item(row, 0).setData(Qt.UserRole, i)
 
-        # Обновление статистики
         self.update_statistics(len(masks_data), areas, confidences)
-
-        # Настройка высоты строк
         self.table.resizeRowsToContents()
 
     def calculate_mask_area(self, mask, img_w, img_h):
-        """Расчет площади маски в пикселях"""
         mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
         return float(np.sum(mask_resized > 0.5))
 
     def calculate_mask_perimeter(self, mask, img_w, img_h):
-        """Расчет периметра маски"""
         mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
         mask_binary = (mask_resized > 0.5).astype(np.uint8)
-
         contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
             return float(cv2.arcLength(contours[0], True))
         return 0.0
 
     def calculate_center(self, mask, img_w, img_h):
-        """Расчет центра масс"""
         mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
         mask_binary = (mask_resized > 0.5).astype(np.uint8)
-
         moments = cv2.moments(mask_binary)
         if moments["m00"] != 0:
-            cx = moments["m10"] / moments["m00"]
-            cy = moments["m01"] / moments["m00"]
-            return cx, cy
+            return moments["m10"] / moments["m00"], moments["m01"] / moments["m00"]
         return 0, 0
 
     def update_statistics(self, total_count, areas, confidences):
-        """Обновление статистической информации"""
         self.total_count_label.setText(f"📈 Всего объектов: {total_count}")
-
         if areas:
-            avg_area = np.mean(areas)
-            self.avg_area_label.setText(f"📐 Ср. площадь: {avg_area:.0f} px²")
+            self.avg_area_label.setText(f"📐 Ср. площадь: {np.mean(areas):.0f} px²")
         else:
             self.avg_area_label.setText("📐 Ср. площадь: 0 px²")
-
         if confidences:
-            avg_conf = np.mean(confidences)
-            self.avg_confidence_label.setText(f"🎯 Ср. уверенность: {avg_conf:.3f}")
+            self.avg_confidence_label.setText(f"🎯 Ср. уверенность: {np.mean(confidences):.3f}")
         else:
             self.avg_confidence_label.setText("🎯 Ср. уверенность: 0")
 
     def on_selection_changed(self):
-        """Обработка изменения выбора в таблице"""
         selected_rows = self.table.selectedItems()
         if selected_rows:
             row = selected_rows[0].row()
             item = self.table.item(row, 0)
             if item:
-                idx = item.data(Qt.UserRole)
-                self.item_selected.emit(idx)
+                self.item_selected.emit(item.data(Qt.UserRole))
 
     def clear(self):
-        """Очистка таблицы"""
         self.table.setRowCount(0)
         self.update_statistics(0, [], [])
 
@@ -473,13 +584,15 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Spheroid Segmentation with YOLO - PyQt Interface")
-        self.setGeometry(100, 100, 1600, 1000)
+        self.setWindowTitle("Spheroid Segmentation with YOLO")
+        self.setGeometry(100, 100, 1500, 900)
 
         self.current_image = None
         self.current_result = None
         self.current_masks = []
         self.original_image = None
+        self.yolo_masks_image = None
+        self.numbered_masks_image = None
 
         self.setup_ui()
         self.create_menu_bar()
@@ -487,34 +600,55 @@ class MainWindow(QMainWindow):
         self.setup_status_bar()
 
     def setup_ui(self):
-        """Настройка пользовательского интерфейса"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        # Основной сплиттер
+        main_layout = QVBoxLayout(central_widget)
+
+        # ===== ВЕРХНЯЯ ПАНЕЛЬ С ИНФОРМАЦИЕЙ О ЗУМЕ =====
+        info_frame = QFrame()
+        info_frame.setStyleSheet("""
+            QFrame {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                margin: 5px;
+            }
+        """)
+        info_layout = QHBoxLayout(info_frame)
+
+        info_icon = QLabel("🖱️")
+        info_icon.setStyleSheet("font-size: 20px;")
+        info_layout.addWidget(info_icon)
+
+        info_text = QLabel(
+            "Управление изображениями: Колесико мыши - приближение/отдаление (0.5x - 3x) | Левая кнопка + перетаскивание - панорамирование (при зуме > 1x) | Ctrl+R - сброс зума")
+        info_text.setStyleSheet("font-size: 12px; color: #333; padding: 5px;")
+        info_text.setWordWrap(True)
+        info_layout.addWidget(info_text, 1)
+
+        main_layout.addWidget(info_frame)
+
+        # ===== ОСНОВНОЙ СПЛИТТЕР =====
         main_splitter = QSplitter(Qt.Horizontal)
 
-        # ===== ЛЕВАЯ ПАНЕЛЬ - Изображения =====
+        # ===== ЛЕВАЯ ПАНЕЛЬ - Изображения (4 окна) =====
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
-        # Drop zone для загрузки
-        self.drop_zone = DropZone("📁 Перетащите изображение сюда\nили используйте меню Файл → Открыть")
-        self.drop_zone.file_dropped.connect(self.load_image)
-        left_layout.addWidget(self.drop_zone)
+        # Сетка изображений 2x2
+        images_container = QWidget()
+        self.image_grid = QGridLayout(images_container)
+        self.image_grid.setSpacing(10)
 
-        # Область для отображения изображений (сетка 2x2 с прокруткой)
-        self.image_grid = QGridLayout()
-        self.image_labels = []
-        self.image_titles = []
-
-        titles = ["Оригинал", "Все контуры", "Похожие контуры", "Результат"]
+        self.image_containers = []
+        titles = ["Оригинал", "Маски YOLO", "Пронумерованные маски", "Выбранный сфероид"]
 
         for i in range(4):
             frame = QFrame()
             frame.setFrameStyle(QFrame.Box)
-            frame.setStyleSheet("QFrame { border: 2px solid #ccc; border-radius: 5px; }")
-            frame.setFixedSize(550, 450)  # Фиксированный размер окна
+            frame.setStyleSheet("QFrame { border: 2px solid #ccc; border-radius: 5px; background: #2b2b2b; }")
+            frame.setMinimumSize(400, 400)
 
             layout = QVBoxLayout(frame)
             layout.setContentsMargins(5, 5, 5, 5)
@@ -523,30 +657,34 @@ class MainWindow(QMainWindow):
             title_label.setAlignment(Qt.AlignCenter)
             title_label.setStyleSheet("font-weight: bold; font-size: 12px; background: #f0f0f0; padding: 5px;")
             title_label.setFixedHeight(30)
-
-            # Используем виджет с прокруткой
-            img_label = ScrollableImageLabel()
-
             layout.addWidget(title_label)
-            layout.addWidget(img_label)
+
+            # Контейнер с изображением
+            img_container = ImageContainer()
+            layout.addWidget(img_container)
 
             row, col = i // 2, i % 2
             self.image_grid.addWidget(frame, row, col)
-            self.image_labels.append(img_label)
-            self.image_titles.append(title_label)
+            self.image_containers.append(img_container)
 
-        # Контейнер для сетки с прокруткой
-        grid_container = QScrollArea()
-        grid_container.setWidgetResizable(True)
-        grid_container.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        grid_container.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        grid_container.setStyleSheet("QScrollArea { border: none; }")
+        # Очищаем 4-е окно (индекс 3)
+        self.image_containers[3].set_image(QPixmap())
+        self.image_containers[3].image_label.setText("Выберите сфероид из таблицы")
 
-        grid_widget = QWidget()
-        grid_widget.setLayout(self.image_grid)
-        grid_container.setWidget(grid_widget)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(images_container)
+        scroll_area.setStyleSheet("QScrollArea { border: none; }")
+        left_layout.addWidget(scroll_area)
 
-        left_layout.addWidget(grid_container)
+        # ===== ПРАВАЯ ПАНЕЛЬ - Управление =====
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+
+        # Drop zone для загрузки файлов
+        self.drop_zone = DropZone("📁 Перетащите изображение сюда\nили используйте кнопку ниже")
+        self.drop_zone.file_dropped.connect(self.load_image)
+        right_layout.addWidget(self.drop_zone)
 
         # Кнопка загрузки через проводник
         self.upload_btn = QPushButton("📥 Выбрать файл через проводник")
@@ -559,23 +697,16 @@ class MainWindow(QMainWindow):
                 border: 1px solid #0277bd;
                 border-radius: 5px;
             }
-            QPushButton:hover {
-                background-color: #b3e5fc;
-            }
+            QPushButton:hover { background-color: #b3e5fc; }
         """)
         self.upload_btn.clicked.connect(self.open_file_dialog)
-        left_layout.addWidget(self.upload_btn)
-
-        # ===== ПРАВАЯ ПАНЕЛЬ - Управление и результаты =====
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
+        right_layout.addWidget(self.upload_btn)
 
         # Группа управления моделью
         control_group = QGroupBox("Управление моделью")
-        control_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        control_group.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 10px; }")
         control_layout = QVBoxLayout(control_group)
 
-        # Кнопка запуска
         self.run_btn = QPushButton("▶ Запустить сегментацию")
         self.run_btn.setFixedHeight(50)
         self.run_btn.setStyleSheet("""
@@ -587,40 +718,33 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-radius: 5px;
             }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:disabled {
-                background-color: #cccccc;
-            }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:disabled { background-color: #cccccc; }
         """)
         self.run_btn.clicked.connect(self.run_segmentation)
         self.run_btn.setEnabled(False)
         control_layout.addWidget(self.run_btn)
 
-        # Ползунок уверенности
-        confidence_layout = QHBoxLayout()
-        confidence_layout.addWidget(QLabel("Порог уверенности:"))
+        conf_layout = QHBoxLayout()
+        conf_layout.addWidget(QLabel("Порог уверенности:"))
         self.confidence_slider = QSlider(Qt.Horizontal)
         self.confidence_slider.setMinimum(0)
         self.confidence_slider.setMaximum(100)
         self.confidence_slider.setValue(50)
         self.confidence_slider.valueChanged.connect(self.update_confidence)
-        confidence_layout.addWidget(self.confidence_slider)
+        conf_layout.addWidget(self.confidence_slider)
 
         self.confidence_label = QLabel("0.50")
         self.confidence_label.setFixedWidth(40)
         self.confidence_label.setStyleSheet("font-weight: bold; color: #2196f3;")
-        confidence_layout.addWidget(self.confidence_label)
-        control_layout.addLayout(confidence_layout)
+        conf_layout.addWidget(self.confidence_label)
+        control_layout.addLayout(conf_layout)
 
-        # Кнопка применения порога
         self.apply_threshold_btn = QPushButton("🔄 Применить порог")
         self.apply_threshold_btn.clicked.connect(self.apply_threshold)
         self.apply_threshold_btn.setEnabled(False)
         control_layout.addWidget(self.apply_threshold_btn)
 
-        # Прогресс бар
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         control_layout.addWidget(self.progress_bar)
@@ -632,8 +756,8 @@ class MainWindow(QMainWindow):
         self.results_table.item_selected.connect(self.on_item_selected)
         right_layout.addWidget(self.results_table, stretch=2)
 
-        # Кнопки сохранения
-        save_group = QGroupBox("Экспорт данных")
+        # Сохранение
+        save_group = QGroupBox("Сохранение")
         save_layout = QHBoxLayout(save_group)
 
         self.save_full_btn = QPushButton("💾 Сохранить изображение")
@@ -641,26 +765,22 @@ class MainWindow(QMainWindow):
         self.save_full_btn.setEnabled(False)
         save_layout.addWidget(self.save_full_btn)
 
-        self.save_csv_btn = QPushButton("📊 Сохранить CSV")
-        self.save_csv_btn.clicked.connect(self.save_csv)
-        self.save_csv_btn.setEnabled(False)
-        save_layout.addWidget(self.save_csv_btn)
-
         right_layout.addWidget(save_group)
 
-        # Добавляем виджеты в сплиттер
         main_splitter.addWidget(left_widget)
         main_splitter.addWidget(right_widget)
-        main_splitter.setSizes([1200, 500])
+        main_splitter.setSizes([1000, 500])
 
-        central_layout = QVBoxLayout(central_widget)
-        central_layout.addWidget(main_splitter)
+        main_layout.addWidget(main_splitter)
+
+    def reset_all_zooms(self):
+        """Сброс зума во всех окнах"""
+        for container in self.image_containers:
+            container.reset_view()
+        self.status_bar.showMessage("Зум сброшен во всех окнах", 2000)
 
     def create_menu_bar(self):
-        """Создание меню"""
         menubar = self.menuBar()
-
-        # Файл
         file_menu = menubar.addMenu("Файл")
 
         open_action = QAction("Открыть...", self)
@@ -670,15 +790,10 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        save_full_action = QAction("Сохранить изображение...", self)
-        save_full_action.setShortcut("Ctrl+S")
-        save_full_action.triggered.connect(self.save_full_image)
-        file_menu.addAction(save_full_action)
-
-        save_csv_action = QAction("Сохранить CSV...", self)
-        save_csv_action.setShortcut("Ctrl+Shift+S")
-        save_csv_action.triggered.connect(self.save_csv)
-        file_menu.addAction(save_csv_action)
+        save_action = QAction("Сохранить изображение...", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_full_image)
+        file_menu.addAction(save_action)
 
         file_menu.addSeparator()
 
@@ -687,14 +802,18 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # Помощь
+        view_menu = menubar.addMenu("Вид")
+        reset_zoom_action = QAction("Сбросить зум во всех окнах", self)
+        reset_zoom_action.setShortcut("Ctrl+R")
+        reset_zoom_action.triggered.connect(self.reset_all_zooms)
+        view_menu.addAction(reset_zoom_action)
+
         help_menu = menubar.addMenu("Помощь")
         about_action = QAction("О программе", self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
 
     def create_tool_bar(self):
-        """Создание панели инструментов"""
         toolbar = QToolBar("Основная")
         toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(toolbar)
@@ -713,56 +832,48 @@ class MainWindow(QMainWindow):
         save_action.triggered.connect(self.save_full_image)
         toolbar.addAction(save_action)
 
+        toolbar.addSeparator()
+
+        reset_zoom_action = QAction("🔍 Сбросить зум", self)
+        reset_zoom_action.triggered.connect(self.reset_all_zooms)
+        toolbar.addAction(reset_zoom_action)
+
     def setup_status_bar(self):
-        """Настройка статусной строки"""
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("Готов к работе. Загрузите изображение.")
 
     def update_confidence(self, value):
-        """Обновление значения уверенности"""
         confidence = value / 100.0
         self.confidence_label.setText(f"{confidence:.2f}")
 
     def open_file_dialog(self):
-        """Открытие диалога выбора файла"""
         file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Выберите изображение",
-            "",
+            self, "Выберите изображение", "",
             "Изображения (*.png *.jpg *.jpeg *.tif *.tiff)"
         )
         if file_path:
             self.load_image(file_path)
 
     def load_image(self, file_path):
-        """Загрузка изображения из файла"""
-        # Очистка памяти
         self.clear_memory()
 
-        # Загрузка изображения
         img = cv2.imread(file_path)
         if img is None:
             QMessageBox.warning(self, "Ошибка", "Не удалось загрузить изображение.")
             return
 
         self.original_image = cv2.resize(img, (1024, 1024))
-
-        # Отображение в интерфейсе
-        self.display_image_in_label(0, self.original_image)
-
+        self.display_image_in_container(0, self.original_image)
         self.current_image = self.original_image.copy()
 
-        # Активация кнопок
         self.run_btn.setEnabled(True)
         self.status_bar.showMessage(f"Загружено: {os.path.basename(file_path)}")
 
-    def display_image_in_label(self, index, image):
-        """Отображение изображения в указанной метке"""
+    def display_image_in_container(self, index, image):
         if image is None:
             return
 
-        # Конвертация BGR (OpenCV) в RGB для Qt
         if len(image.shape) == 3:
             rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         else:
@@ -773,21 +884,43 @@ class MainWindow(QMainWindow):
         qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
         pixmap = QPixmap.fromImage(qt_image)
 
-        self.image_labels[index].set_image(pixmap)
+        self.image_containers[index].set_image(pixmap)
+
+    def create_numbered_masks_image(self):
+        """Создание изображения с пронумерованными масками"""
+        if self.original_image is None or not self.current_masks:
+            return
+
+        h, w = self.original_image.shape[:2]
+        self.numbered_masks_image = self.original_image.copy()
+
+        for i, mask_data in enumerate(self.current_masks):
+            mask = mask_data['mask']
+            mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+            mask_binary = (mask_resized > 0.5).astype(np.uint8)
+            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            cv2.drawContours(self.numbered_masks_image, contours, -1, (0, 255, 0), 2)
+
+            if contours:
+                M = cv2.moments(contours[0])
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    cv2.circle(self.numbered_masks_image, (cx, cy), 15, (255, 0, 0), -1)
+                    cv2.putText(self.numbered_masks_image, str(i + 1), (cx - 7, cy + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
     def run_segmentation(self):
-        """Запуск сегментации в отдельном потоке"""
         if self.current_image is None:
             return
 
-        # Блокировка кнопок во время обработки
         self.run_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
 
         confidence = float(self.confidence_label.text())
 
-        # Запуск потока обработки
         self.processing_thread = ProcessingThread(self.current_image, confidence)
         self.processing_thread.progress.connect(self.progress_bar.setValue)
         self.processing_thread.status.connect(self.status_bar.showMessage)
@@ -795,232 +928,171 @@ class MainWindow(QMainWindow):
         self.processing_thread.start()
 
     def on_processing_finished(self, data):
-        """Обработка завершения сегментации"""
         self.current_result = data['result']
         self.current_masks = data['masks']
+        self.yolo_masks_image = data['plotted']
 
-        # Отображение результатов
-        plotted = data['plotted']
-        self.display_image_in_label(3, plotted)
+        self.create_numbered_masks_image()
 
-        # Создание изображений для контуров
-        self.create_contour_visualizations()
+        self.display_image_in_container(1, self.yolo_masks_image)
+        self.display_image_in_container(2, self.numbered_masks_image)
 
-        # Заполнение таблицы результатов
+        # Очищаем 4-е окно
+        self.image_containers[3].set_image(QPixmap())
+        self.image_containers[3].image_label.setText("Выберите сфероид из таблицы")
+
         self.results_table.update_data(self.current_masks, self.original_image)
 
-        # Активация кнопок
         self.run_btn.setEnabled(True)
         self.apply_threshold_btn.setEnabled(True)
         self.save_full_btn.setEnabled(True)
-        self.save_csv_btn.setEnabled(True)
 
         self.progress_bar.setVisible(False)
         self.status_bar.showMessage(f"Сегментация завершена. Найдено {len(self.current_masks)} объектов")
 
-    def create_contour_visualizations(self):
-        """Создание визуализаций для всех контуров и похожих контуров"""
-        if self.original_image is None or not self.current_masks:
-            return
-
-        h, w = self.original_image.shape[:2]
-
-        # Изображение для всех контуров
-        all_contours_img = self.original_image.copy()
-        # Изображение для похожих контуров (по площади)
-        similar_contours_img = self.original_image.copy()
-
-        # Находим среднюю площадь для определения "похожих"
-        areas = []
-        for mask_data in self.current_masks:
-            area = self.calculate_mask_area(mask_data['mask'], w, h)
-            areas.append(area)
-
-        if areas:
-            avg_area = np.mean(areas)
-            tolerance = 0.3  # 30% допуск
-
-        for i, mask_data in enumerate(self.current_masks):
-            mask = mask_data['mask']
-
-            # Масштабирование маски до размера изображения
-            mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-            mask_binary = (mask_resized > 0.5).astype(np.uint8)
-
-            # Нахождение контуров
-            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            # Рисуем все контуры зеленым
-            cv2.drawContours(all_contours_img, contours, -1, (0, 255, 0), 2)
-
-            # Для похожих контуров
-            area = areas[i] if i < len(areas) else 0
-            if areas and abs(area - avg_area) / avg_area <= tolerance:
-                cv2.drawContours(similar_contours_img, contours, -1, (0, 255, 0), 2)
-                # Добавляем номер
-                M = cv2.moments(contours[0]) if contours else None
-                if M and M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    cv2.putText(similar_contours_img, str(i + 1), (cx, cy),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-
-        # Отображение
-        self.display_image_in_label(1, all_contours_img)
-        self.display_image_in_label(2, similar_contours_img)
-
-    def calculate_mask_area(self, mask, img_w, img_h):
-        """Расчет площади маски в пикселях"""
-        mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
-        return float(np.sum(mask_resized > 0.5))
-
     def apply_threshold(self):
-        """Применение порога уверенности к результатам"""
         if self.current_result is None:
             return
 
         confidence = float(self.confidence_label.text())
-
-        # Фильтрация масок по порогу
-        filtered_masks = []
-        for mask_data in self.current_masks:
-            if mask_data['conf'] >= confidence:
-                filtered_masks.append(mask_data)
-
+        filtered_masks = [m for m in self.current_masks if m['conf'] >= confidence]
         self.current_masks = filtered_masks
 
-        # Обновление таблицы
+        self.processing_thread = ProcessingThread(self.current_image, confidence)
+        self.processing_thread.finished.connect(self.on_threshold_applied)
+        self.processing_thread.start()
+
+    def on_threshold_applied(self, data):
+        self.current_result = data['result']
+        self.current_masks = data['masks']
+        self.yolo_masks_image = data['plotted']
+
+        self.create_numbered_masks_image()
+
+        self.display_image_in_container(1, self.yolo_masks_image)
+        self.display_image_in_container(2, self.numbered_masks_image)
+
+        # Очищаем 4-е окно
+        self.image_containers[3].set_image(QPixmap())
+        self.image_containers[3].image_label.setText("Выберите сфероид из таблицы")
+
         self.results_table.update_data(self.current_masks, self.original_image)
-
-        # Обновление визуализаций
-        self.create_contour_visualizations()
-
-        self.status_bar.showMessage(f"Применен порог {confidence:.2f}, осталось {len(self.current_masks)} объектов")
+        self.status_bar.showMessage(f"Применен порог, осталось {len(self.current_masks)} объектов")
 
     def on_item_selected(self, idx):
-        """Обработка выбора элемента из таблицы"""
+        """Обработка выбора элемента из таблицы - показываем выбранный сфероид в 4-м окне"""
         if idx is not None and idx < len(self.current_masks):
-            self.highlight_mask(self.current_masks[idx])
+            self.show_selected_spheroid(idx)
 
-    def highlight_mask(self, mask_data):
-        """Подсветка выбранной маски на изображении результата"""
-        if self.original_image is None or self.current_result is None:
+    def show_selected_spheroid(self, idx):
+        """Показ выбранного сфероида в 4-м окне"""
+        if self.original_image is None:
             return
 
+        mask_data = self.current_masks[idx]
         h, w = self.original_image.shape[:2]
         mask = mask_data['mask']
 
-        # Масштабирование маски
         mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
         mask_binary = (mask_resized > 0.5).astype(np.uint8)
+        contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # Создание подсвеченного изображения
-        highlighted = self.original_image.copy()
-        highlighted[mask_binary == 1] = [0, 0, 255]  # Красный цвет для подсветки
+        if contours:
+            x, y, box_w, box_h = cv2.boundingRect(contours[0])
 
-        # Отображение в последнем слоте (временно)
-        self.display_image_in_label(3, highlighted)
+            # Добавляем отступ 50%
+            padding = int(max(box_w, box_h) * 0.5)
+            x1 = max(0, x - padding)
+            y1 = max(0, y - padding)
+            x2 = min(w, x + box_w + padding)
+            y2 = min(h, y + box_h + padding)
 
-        # Возврат к нормальному виду через 2 секунды
-        QTimer.singleShot(2000, lambda: self.display_image_in_label(3,
-                                                                    self.current_result.plot() if self.current_result else highlighted))
+            # Вырезаем область из оригинального изображения
+            zoom_region = self.original_image[y1:y2, x1:x2].copy()
+
+            # Рисуем контур зеленым
+            for cnt in contours:
+                cnt_adjusted = cnt - [x1, y1]
+                cv2.drawContours(zoom_region, [cnt_adjusted], -1, (0, 255, 0), 3)
+
+            # Добавляем номер
+            for cnt in contours:
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"]) - x1
+                    cy = int(M["m01"] / M["m00"]) - y1
+                    cv2.circle(zoom_region, (cx, cy), 20, (255, 0, 0), -1)
+                    cv2.putText(zoom_region, str(idx + 1), (cx - 8, cy + 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    break
+
+            # Добавляем информацию
+            info = f"ID: {idx + 1} | {mask_data['class_name']} | conf: {mask_data['conf']:.2f}"
+            cv2.putText(zoom_region, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # Добавляем рамку
+            cv2.rectangle(zoom_region, (0, 0), (zoom_region.shape[1] - 1, zoom_region.shape[0] - 1), (0, 255, 0), 3)
+
+            # Отображаем
+            rgb_zoom = cv2.cvtColor(zoom_region, cv2.COLOR_BGR2RGB)
+            h_z, w_z, ch_z = rgb_zoom.shape
+            bytes_per_line = ch_z * w_z
+            qt_image = QImage(rgb_zoom.data, w_z, h_z, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+
+            self.image_containers[3].set_image(pixmap)
 
     def save_full_image(self):
-        """Сохранение полного изображения"""
         if self.current_result is None:
             QMessageBox.warning(self, "Ошибка", "Нет результатов для сохранения.")
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Сохранить изображение",
-            "result.png",
+            self, "Сохранить изображение", "result.png",
             "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
-
         if file_path:
-            plotted = self.current_result.plot()
-            cv2.imwrite(file_path, plotted)
+            cv2.imwrite(file_path, self.current_result.plot())
             self.status_bar.showMessage(f"Изображение сохранено: {file_path}")
 
-    def save_csv(self):
-        """Сохранение результатов в CSV"""
-        if not self.current_masks:
-            QMessageBox.warning(self, "Ошибка", "Нет данных для сохранения.")
-            return
-
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Сохранить CSV",
-            "results.csv",
-            "CSV (*.csv)"
-        )
-
-        if file_path:
-            import csv
-            h, w = self.original_image.shape[:2] if self.original_image is not None else (1, 1)
-
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Номер', 'Класс', 'Уверенность', 'Площадь (пикс)', 'Радиус (пикс)',
-                                 'Периметр (пикс)', 'Компактность', 'Центр X', 'Центр Y'])
-
-                for i, mask_data in enumerate(self.current_masks):
-                    area = self.calculate_mask_area(mask_data['mask'], w, h)
-                    radius = np.sqrt(area / np.pi)
-                    perimeter = self.results_table.calculate_mask_perimeter(mask_data['mask'], w, h)
-                    compactness = (4 * np.pi * area) / (perimeter * perimeter) if perimeter > 0 else 0
-                    center_x, center_y = self.results_table.calculate_center(mask_data['mask'], w, h)
-
-                    writer.writerow([
-                        i + 1,
-                        mask_data['class_name'],
-                        f"{mask_data['conf']:.3f}",
-                        f"{area:.0f}",
-                        f"{radius:.1f}",
-                        f"{perimeter:.1f}",
-                        f"{compactness:.3f}",
-                        f"{center_x:.1f}",
-                        f"{center_y:.1f}"
-                    ])
-
-            self.status_bar.showMessage(f"CSV сохранен: {file_path}")
-
     def clear_memory(self):
-        """Очистка памяти"""
         self.current_image = None
         self.current_result = None
         self.current_masks = []
+        self.yolo_masks_image = None
+        self.numbered_masks_image = None
 
-        for label in self.image_labels:
-            label.clear()
-
+        for container in self.image_containers:
+            container.clear()
         self.results_table.clear()
 
-        # Очистка GPU памяти
+        # Устанавливаем текст для 4-го окна
+        self.image_containers[3].image_label.setText("Выберите сфероид из таблицы")
+
         torch.cuda.empty_cache()
         gc.collect()
 
     def show_about(self):
-        """Показ информации о программе"""
-        QMessageBox.about(
-            self,
-            "О программе",
-            """<h3>Spheroid Segmentation with YOLO</h3>
+        QMessageBox.about(self, "О программе", """
+            <h3>Spheroid Segmentation with YOLO</h3>
             <p>Версия: 1.0</p>
             <p>Программа для сегментации сфероидов на изображениях с микроскопа.</p>
-            <p>Используемые технологии:</p>
+            <p><b>Управление изображениями:</b></p>
             <ul>
-                <li>YOLOv8 для сегментации</li>
-                <li>PyQt5 для интерфейса</li>
-                <li>OpenCV для обработки изображений</li>
+                <li><b>Колесико мыши</b> - приближение/отдаление (от 0.5x до 3x)</li>
+                <li><b>Левая кнопка мыши + перетаскивание</b> - панорамирование (работает при любом зуме > 1x)</li>
+                <li><b>Ctrl+R</b> - сброс зума во всех окнах</li>
             </ul>
-            <p>© 2024</p>
-            """
-        )
+            <p><b>Окна:</b></p>
+            <ul>
+                <li><b>Оригинал</b> - исходное изображение</li>
+                <li><b>Маски YOLO</b> - результат работы YOLO</li>
+                <li><b>Пронумерованные маски</b> - зеленые контуры с номерами</li>
+                <li><b>Выбранный сфероид</b> - увеличенное изображение выбранного сфероида</li>
+            </ul>
+        """)
 
     def closeEvent(self, event):
-        """Обработка закрытия окна"""
         self.clear_memory()
         event.accept()
 
@@ -1028,10 +1100,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
-
     window = MainWindow()
     window.show()
-
     sys.exit(app.exec_())
 
 
