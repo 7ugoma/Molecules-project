@@ -14,6 +14,8 @@ from PyQt5.QtGui import QPixmap, QImage, QFont, QColor, QBrush, QWheelEvent
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QPoint, QEvent
 from ultralytics import YOLO
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 
 # ========== ФУНКЦИИ ИЗ molecs.py ==========
@@ -111,6 +113,51 @@ def process_image_with_yolo(img_way, model_name='best.pt'):
                 quant += 1
 
     return square_list, img_res, results
+
+
+def draw_russian_text(image, text, position, font_size=20, color=(255, 255, 255),
+                      outline_color=(0, 0, 0), outline_width=2):
+    """
+    Рисует русский текст на изображении с обводкой для лучшей читаемости
+    """
+    # Конвертируем OpenCV BGR в RGB для PIL
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(image_rgb)
+    draw = ImageDraw.Draw(pil_image)
+
+    # Загружаем шрифт с поддержкой кириллицы
+    font = None
+    font_paths = [
+        "arial.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Arial.ttf"
+    ]
+
+    for font_path in font_paths:
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+            break
+        except:
+            continue
+
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Рисуем обводку
+    if outline_width > 0:
+        for dx in range(-outline_width, outline_width + 1):
+            for dy in range(-outline_width, outline_width + 1):
+                if dx != 0 or dy != 0:
+                    draw.text((position[0] + dx, position[1] + dy), text,
+                              font=font, fill=tuple(outline_color))
+
+    # Рисуем основной текст
+    draw.text(position, text, font=font, fill=tuple(color))
+
+    # Конвертируем обратно в OpenCV BGR
+    return cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
 
 
 # ========== КЛАССЫ ИНТЕРФЕЙСА ==========
@@ -393,16 +440,8 @@ class ImageContainer(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("QScrollArea { border: none; background: #2b2b2b; }")
-
         self.image_label = ZoomableImageLabel()
-        self.scroll_area.setWidget(self.image_label)
-
-        layout.addWidget(self.scroll_area)
+        layout.addWidget(self.image_label)
 
     def set_image(self, pixmap):
         self.image_label.set_image(pixmap)
@@ -513,22 +552,25 @@ class ResultsTableWidget(QWidget):
         layout.addWidget(self.header_label)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
-            "№", "Класс", "Уверенность", "Насыщенность %", "Площадь", "Радиус",
-            "Периметр", "Центр X", "Центр Y"
+            "Класс", "Уверенность", "Насыщенность %", "Площадь", "Радиус",
+             "Центр X", "Центр Y"
         ])
 
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setSortingEnabled(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSortingEnabled(False)
+
+
 
         header = self.table.horizontalHeader()
         header.setSectionsMovable(False)
         header.setSectionResizeMode(QHeaderView.Fixed)
 
-        column_widths = [40, 100, 90, 110, 80, 70, 80, 80, 80]
+        column_widths = [110, 100, 120, 90, 80, 90, 90]
         for i, width in enumerate(column_widths):
             self.table.setColumnWidth(i, width)
 
@@ -602,8 +644,7 @@ class ResultsTableWidget(QWidget):
             confidences.append(mask_data['conf'])
             fill_percentages.append(fill_pct)
 
-            self.table.setItem(row, 0, QTableWidgetItem(str(mask_data['index'])))
-            self.table.setItem(row, 1, QTableWidgetItem(mask_data['class_name']))
+            self.table.setItem(row, 0, QTableWidgetItem(mask_data['class_name']))
 
             conf_item = QTableWidgetItem(f"{mask_data['conf']:.3f}")
             if mask_data['conf'] > 0.7:
@@ -612,7 +653,7 @@ class ResultsTableWidget(QWidget):
                 conf_item.setForeground(QBrush(QColor(255, 152, 0)))
             else:
                 conf_item.setForeground(QBrush(QColor(244, 67, 54)))
-            self.table.setItem(row, 2, conf_item)
+            self.table.setItem(row, 1, conf_item)
 
             fill_item = QTableWidgetItem(f"{fill_pct:.1f}%")
             if fill_pct > 70:
@@ -621,13 +662,12 @@ class ResultsTableWidget(QWidget):
                 fill_item.setForeground(QBrush(QColor(255, 152, 0)))
             else:
                 fill_item.setForeground(QBrush(QColor(76, 175, 80)))
-            self.table.setItem(row, 3, fill_item)
+            self.table.setItem(row, 2, fill_item)
 
-            self.table.setItem(row, 4, QTableWidgetItem(f"{area:.0f}"))
-            self.table.setItem(row, 5, QTableWidgetItem(f"{radius:.1f}"))
-            self.table.setItem(row, 6, QTableWidgetItem(f"{perimeter:.1f}"))
-            self.table.setItem(row, 7, QTableWidgetItem(f"{center[0]:.1f}"))
-            self.table.setItem(row, 8, QTableWidgetItem(f"{center[1]:.1f}"))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{area:.0f}"))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{radius:.1f}"))
+            self.table.setItem(row, 5, QTableWidgetItem(f"{center[0]:.1f}"))
+            self.table.setItem(row, 6, QTableWidgetItem(f"{center[1]:.1f}"))
 
             self.table.item(row, 0).setData(Qt.UserRole, i)
 
@@ -635,15 +675,19 @@ class ResultsTableWidget(QWidget):
         self.table.resizeRowsToContents()
 
     def calculate_mask_area(self, mask, img_w, img_h):
-        mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+        if len(mask.shape) > 2:
+            mask = mask.squeeze()
+        mask_resized = cv2.resize(mask.astype(np.float32), (img_w, img_h), interpolation=cv2.INTER_LINEAR)
         return float(np.sum(mask_resized > 0.5))
 
     def calculate_mask_perimeter(self, mask, img_w, img_h):
-        mask_resized = cv2.resize(mask, (img_w, img_h), interpolation=cv2.INTER_NEAREST)
+        if len(mask.shape) > 2:
+            mask = mask.squeeze()
+        mask_resized = cv2.resize(mask.astype(np.float32), (img_w, img_h), interpolation=cv2.INTER_LINEAR)
         mask_binary = (mask_resized > 0.5).astype(np.uint8)
         contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
-            return float(cv2.arcLength(contours[0], True))
+            return float(cv2.arcLength(max(contours, key=cv2.contourArea), True))
         return 0.0
 
     def update_statistics(self, total_count, confidences, fill_percentages):
@@ -687,7 +731,6 @@ class MainWindow(QMainWindow):
 
         self.setup_ui()
         self.create_menu_bar()
-        self.create_tool_bar()
         self.setup_status_bar()
 
     def setup_ui(self):
@@ -697,25 +740,26 @@ class MainWindow(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         info_frame = QFrame()
+        info_frame.setMaximumHeight(45)
         info_frame.setStyleSheet("""
             QFrame {
                 background-color: #f0f0f0;
                 border: 1px solid #ccc;
                 border-radius: 5px;
-                margin: 5px;
+                margin: 2px;
             }
         """)
         info_layout = QHBoxLayout(info_frame)
+        info_layout.setContentsMargins(6, 2, 6, 2)
 
         info_icon = QLabel("🖱️")
-        info_icon.setStyleSheet("font-size: 20px;")
+        info_icon.setStyleSheet("font-size: 14px;")
         info_layout.addWidget(info_icon)
 
         info_text = QLabel(
             "Управление: Колесико мыши - зум (0.5x - 3x) | Левая кнопка + перетаскивание - панорамирование | Ctrl+R - сброс зума"
         )
-        info_text.setStyleSheet("font-size: 12px; color: #333; padding: 5px;")
-        info_text.setWordWrap(True)
+        info_text.setStyleSheet("font-size: 12px; color: #333")
         info_layout.addWidget(info_text, 1)
 
         main_layout.addWidget(info_frame)
@@ -758,11 +802,7 @@ class MainWindow(QMainWindow):
         self.image_containers[3].set_image(QPixmap())
         self.image_containers[3].image_label.setText("Выберите сфероид из таблицы")
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(images_container)
-        scroll_area.setStyleSheet("QScrollArea { border: none; }")
-        left_layout.addWidget(scroll_area)
+        left_layout.addWidget(images_container)
 
         # Правая панель - управление
         right_widget = QWidget()
@@ -1021,46 +1061,125 @@ class MainWindow(QMainWindow):
         h, w = self.original_image.shape[:2]
         mask = mask_data['mask']
 
-        mask_resized = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
-        mask_binary = (mask_resized > 0.5).astype(np.uint8)
-        contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        try:
+            # Получаем маску в правильном размере
+            if len(mask.shape) > 2:
+                mask = mask.squeeze()
 
-        if contours:
-            x, y, box_w, box_h = cv2.boundingRect(contours[0])
+            # Изменяем размер маски до размера изображения
+            mask_resized = cv2.resize(mask.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+            mask_binary = (mask_resized > 0.5).astype(np.uint8)
 
-            padding = int(max(box_w, box_h) * 0.5)
+            # Находим контуры
+            contours, hierarchy = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            if not contours:
+                # Если контуры не найдены, используем bbox
+                bbox = mask_data.get('bbox')
+                if bbox:
+                    x1, y1, x2, y2 = [int(coord) for coord in bbox]
+                    # Создаем прямоугольный контур
+                    contour = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
+                    contours = [contour]
+                else:
+                    self.status_bar.showMessage(f"Не удалось найти контур для сфероида {mask_data['index']}", 3000)
+                    return
+
+            # Выбираем основной контур (самый большой)
+            main_contour = max(contours, key=cv2.contourArea)
+
+            # Получаем bounding box для обрезки
+            x, y, box_w, box_h = cv2.boundingRect(main_contour)
+
+            # Добавляем отступ
+            padding = int(max(box_w, box_h) * 0.3) + 20
             x1 = max(0, x - padding)
             y1 = max(0, y - padding)
             x2 = min(w, x + box_w + padding)
             y2 = min(h, y + box_h + padding)
 
+            # Проверяем, что область обрезки корректна
+            if x1 >= x2 or y1 >= y2:
+                x1 = max(0, x - 50)
+                y1 = max(0, y - 50)
+                x2 = min(w, x + box_w + 50)
+                y2 = min(h, y + box_h + 50)
+
+            # Создаем копию области для отображения
             zoom_region = self.original_image[y1:y2, x1:x2].copy()
 
-            # Рисуем контур
-            for cnt in contours:
-                cnt_adjusted = cnt - [x1, y1]
-                cv2.drawContours(zoom_region, [cnt_adjusted], -1, (0, 255, 0), 3)
+            # Корректируем контур для обрезанной области
+            # adjusted_contour = main_contour - [x1, y1]
+            #
+            # # Рисуем контур
+            # cv2.drawContours(zoom_region, [adjusted_contour], -1, (0, 255, 0), 3)
+            #
+            # # Рисуем заливку маски с прозрачностью (опционально)
+            # mask_cropped = mask_binary[y1:y2, x1:x2]
+            # if mask_cropped.shape[0] > 0 and mask_cropped.shape[1] > 0:
+            #     # Создаем цветную маску для наложения
+            #     colored_mask = np.zeros_like(zoom_region)
+            #     colored_mask[mask_cropped == 1] = [255, 100, 0]  # Синий цвет для маски
+            #     # Накладываем маску с прозрачностью
+            #     zoom_region = cv2.addWeighted(zoom_region, 0.7, colored_mask, 0.3, 0)
 
-            # Синий кружок с номером (такой же стиль как на основном изображении)
-            center = mask_data['center']
-            cx_local = int(center[0] - x1)
-            cy_local = int(center[1] - y1)
+            # Рисуем центр и номер
+            center = mask_data.get('center')
+            if center:
+                cx_local = int(center[0] - x1)
+                cy_local = int(center[1] - y1)
+                radius = mask_data.get('radius', 20)
 
-            cv2.circle(zoom_region, (cx_local, cy_local), mask_data['radius'] + 5, (255, 0, 0), 3)
-            cv2.circle(zoom_region, (cx_local, cy_local), 25, (255, 0, 0), -1)
-            cv2.putText(zoom_region, str(mask_data['index']), (cx_local - 12, cy_local + 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                # Проверяем, что центр в пределах изображения
+                if 0 <= cx_local < zoom_region.shape[1] and 0 <= cy_local < zoom_region.shape[0]:
+                    cv2.circle(zoom_region, (cx_local, cy_local), radius + 5, (255, 0, 0), 3)
+                    cv2.circle(zoom_region, (cx_local, cy_local), 25, (255, 0, 0), -1)
+                    cv2.putText(zoom_region, str(mask_data['index']), (cx_local - 12, cy_local + 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-            # Информация
+            # Текст для отображения
             fill_pct = mask_data.get('fill_percentage', 0.0)
-            info1 = f"ID: {mask_data['index']} | {mask_data['class_name']} | conf: {mask_data['conf']:.2f}"
-            info2 = f"Насыщенность: {fill_pct:.1f}%"
-            cv2.putText(zoom_region, info1, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            cv2.putText(zoom_region, info2, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (0, 255, 0) if fill_pct < 40 else (0, 165, 255) if fill_pct < 70 else (0, 0, 255), 2)
 
+            # Определяем цвет для насыщенности
+            if fill_pct < 40:
+                fill_color = (0, 255, 0)  # Зеленый (BGR)
+            elif fill_pct < 70:
+                fill_color = (0, 165, 255)  # Оранжевый (BGR)
+            else:
+                fill_color = (0, 0, 255)  # Красный (BGR)
+
+            # Текст для отображения
+            info1 = f"ID: {mask_data['index']} | Класс: {mask_data['class_name']} | Уверенность: {mask_data['conf']:.2f}"
+            info2 = f"Насыщенность: {fill_pct:.1f}%"
+
+            # Рисуем русский текст с помощью PIL
+            try:
+                zoom_region = draw_russian_text(zoom_region, info1, (10, 30), font_size=16,
+                                                color=(255, 255, 255), outline_color=(0, 0, 0), outline_width=2)
+                zoom_region = draw_russian_text(zoom_region, info2, (10, 60), font_size=16,
+                                                color=fill_color, outline_color=(0, 0, 0), outline_width=2)
+            except Exception as e:
+                # Если не удалось нарисовать русский текст, используем английский
+                print(f"Error drawing Russian text: {e}")
+                info1_en = f"ID: {mask_data['index']} | Class: {mask_data['class_name']} | Conf: {mask_data['conf']:.2f}"
+                info2_en = f"Fill rate: {fill_pct:.1f}%"
+                cv2.putText(zoom_region, info1_en, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                cv2.putText(zoom_region, info2_en, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, fill_color, 2)
+
+            # Рисуем рамку
             cv2.rectangle(zoom_region, (0, 0), (zoom_region.shape[1] - 1, zoom_region.shape[0] - 1), (0, 255, 0), 3)
 
+            # Дополнительная информация о площади
+            area = cv2.contourArea(main_contour)
+            info3 = f"Площадь: {area:.0f} пикс."
+            try:
+                zoom_region = draw_russian_text(zoom_region, info3, (10, 85), font_size=12,
+                                                color=(200, 200, 200), outline_color=(0, 0, 0), outline_width=1)
+            except:
+                cv2.putText(zoom_region, f"Area: {area:.0f} px", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (200, 200, 200), 1)
+
+            # Конвертируем и отображаем
             rgb_zoom = cv2.cvtColor(zoom_region, cv2.COLOR_BGR2RGB)
             h_z, w_z, ch_z = rgb_zoom.shape
             bytes_per_line = ch_z * w_z
@@ -1068,6 +1187,12 @@ class MainWindow(QMainWindow):
             pixmap = QPixmap.fromImage(qt_image)
 
             self.image_containers[3].set_image(pixmap)
+
+        except Exception as e:
+            self.status_bar.showMessage(f"Ошибка при отображении сфероида: {str(e)}", 3000)
+            print(f"Error in show_selected_spheroid: {e}")
+            import traceback
+            traceback.print_exc()
 
     def save_full_image(self):
         if self.numbered_masks_image is None:
